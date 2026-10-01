@@ -31,7 +31,7 @@ AV1 の映像 1 本と、映像に同期して**重ねて**再生できる Opus 
 
 | OS | 依存パッケージの入れ方 |
 |---|---|
-| Fedora | `sudo dnf install dav1d-devel opus-devel alsa-lib-devel pkgconf ffmpeg` |
+| Fedora | `sudo dnf install libdav1d-devel opus-devel alsa-lib-devel pkgconf ffmpeg` |
 | Debian / Ubuntu | `sudo apt install libdav1d-dev libopus-dev libasound2-dev pkg-config ffmpeg` |
 | macOS | `brew install dav1d opus pkg-config ffmpeg` |
 | Windows | MSYS2 の UCRT64 環境で `pacman -S mingw-w64-ucrt-x86_64-{rust,dav1d,opus,pkgconf,gcc,ffmpeg}` |
