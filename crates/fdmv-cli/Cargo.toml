@@ -1,0 +1,18 @@
+[package]
+name = "fdmv-cli"
+description = "Command line tools for the FDMV video format"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "fdmv"
+path = "src/main.rs"
+
+[dependencies]
+libfdmv.workspace = true
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"

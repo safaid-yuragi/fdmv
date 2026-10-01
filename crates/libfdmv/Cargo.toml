@@ -1,0 +1,24 @@
+[package]
+name = "libfdmv"
+description = "Reader, writer and decoder for the FDMV video format"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["decode"]
+# AV1 (dav1d) / Opus (libopus) decoding. Requires the system libraries.
+decode = ["dep:dav1d", "dep:opusic-sys", "dep:pkg-config"]
+# libopus をソースからビルドして静的リンクする（cmake が必要）。Windows で便利。
+bundled-opus = ["decode", "opusic-sys/bundled"]
+
+[build-dependencies]
+pkg-config = { version = "0.3", optional = true }
+
+[dependencies]
+crc32fast = "1"
+tempfile = "3"
+thiserror = "2"
+dav1d = { version = "0.11", optional = true }
+opusic-sys = { version = "0.7", default-features = false, optional = true }
