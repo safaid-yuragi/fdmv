@@ -66,7 +66,7 @@ pub fn video_graph(project: &Project) -> (Vec<OsString>, String) {
         ]);
         filter.push_str(&format!(
             "[{i}:v:0]trim=duration={d:.6},setpts=PTS-STARTPTS,fps={fn_}/{fd},\
-             scale={w}:{h}:force_original_aspect_ratio=decrease,\
+             scale={w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos,\
              pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format={pix}[v{i}];",
             d = c.duration()
         ));

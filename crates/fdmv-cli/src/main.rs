@@ -83,10 +83,13 @@ pub struct VideoOpts {
     /// AV1 エンコーダ（libsvtav1 / libaom-av1 / librav1e）。省略時は自動
     #[arg(long)]
     pub encoder: Option<String>,
-    /// 画質 0–63（小さいほど高画質・大容量）
-    #[arg(long, default_value_t = 32, value_parser = clap::value_parser!(u32).range(0..=63))]
-    pub crf: u32,
-    /// 速度プリセット（SVT-AV1: 0–13、既定 8。値が小さいほど遅く高効率）
+    /// 画質プリセット（best: CRF 18 / high: CRF 23 / standard: CRF 30 / small: CRF 38）
+    #[arg(short = 'Q', long, value_enum, default_value_t = QualityArg::High)]
+    pub quality: QualityArg,
+    /// 画質 0–63（小さいほど高画質・大容量）。指定すると --quality より優先
+    #[arg(long, value_parser = clap::value_parser!(u32).range(0..=63))]
+    pub crf: Option<u32>,
+    /// 速度プリセット（SVT-AV1: 0–13。値が小さいほど遅く高効率）。指定すると --quality より優先
     #[arg(long)]
     pub preset: Option<u32>,
     /// 10 bit で符号化する（グラデーションの帯が出にくく、圧縮効率も上がる）
@@ -95,6 +98,18 @@ pub struct VideoOpts {
     /// ffmpeg に追加で渡す出力オプション（例: `--ffmpeg-arg=-vf --ffmpeg-arg=scale=1280:-2`）
     #[arg(long, allow_hyphen_values = true)]
     pub ffmpeg_arg: Vec<String>,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum QualityArg {
+    /// ほぼ無劣化（CRF 18）
+    Best,
+    /// 高画質（CRF 23、既定）
+    High,
+    /// 標準（CRF 30）
+    Standard,
+    /// 小容量（CRF 38）
+    Small,
 }
 
 #[derive(clap::Args)]

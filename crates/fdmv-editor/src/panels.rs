@@ -2,6 +2,7 @@
 
 use eframe::egui::{self, Align, Color32, Layout, RichText, Sense, Vec2};
 use fdmv_edit::ChainRole;
+use libfdmv::ffmpeg::Quality;
 
 use crate::app::{ACCENT, App, time_label};
 use crate::jobs::ProxyState;
@@ -460,17 +461,40 @@ impl App {
                 let _ = fps;
                 ui.end_row();
             }
-            ui.label("画質 (CRF)");
+            ui.label("画質");
+            let current = Quality::from_crf_preset(s.crf, s.preset);
+            egui::ComboBox::from_id_salt("quality")
+                .selected_text(current.map(quality_label).unwrap_or("カスタム"))
+                .show_ui(ui, |ui| {
+                    for q in Quality::ALL {
+                        if ui
+                            .selectable_label(current == Some(q), quality_label(q))
+                            .clicked()
+                        {
+                            let (crf, preset) = q.crf_preset();
+                            s.crf = crf;
+                            s.preset = Some(preset);
+                            changed = true;
+                        }
+                    }
+                });
+            ui.end_row();
+            ui.label("");
+            ui.label(RichText::new(quality_note(current)).small().weak());
+            ui.end_row();
+            ui.label("CRF");
             changed |= ui
-                .add(egui::Slider::new(&mut s.crf, 10..=63))
-                .on_hover_text("小さいほど高画質・大容量")
+                .add(egui::Slider::new(&mut s.crf, 10..=50))
+                .on_hover_text("小さいほど高画質・大容量（18 でほぼ無劣化、23 が高画質）")
                 .changed();
             ui.end_row();
             ui.label("速度");
-            let mut preset = s.preset.unwrap_or(8) as i32;
+            let mut preset = s.preset.unwrap_or(6) as i32;
             if ui
                 .add(egui::Slider::new(&mut preset, 0..=13))
-                .on_hover_text("SVT-AV1 のプリセット。小さいほど遅く高効率")
+                .on_hover_text(
+                    "SVT-AV1 のプリセット。小さいほど遅いが、同じ画質でファイルが小さくなる",
+                )
                 .changed()
             {
                 s.preset = Some(preset as u32);
@@ -707,9 +731,15 @@ impl App {
                     .collect();
                 ui.label(
                     RichText::new(format!(
-                        "{}  {w}x{h}  {:.3} fps  CRF {}\nチェーン: {}",
+                        "{}  {w}x{h}  {:.3} fps  {}（CRF {}）\nチェーン: {}",
                         time_label(self.project.duration()),
                         n as f64 / d as f64,
+                        Quality::from_crf_preset(
+                            self.project.settings.crf,
+                            self.project.settings.preset
+                        )
+                        .map(quality_label)
+                        .unwrap_or("カスタム"),
                         self.project.settings.crf,
                         chains.join("、")
                     ))
@@ -786,6 +816,25 @@ impl App {
             }
             self.show_export = running;
         }
+    }
+}
+
+fn quality_label(q: Quality) -> &'static str {
+    match q {
+        Quality::Best => "最高画質（ほぼ無劣化）",
+        Quality::High => "高画質",
+        Quality::Standard => "標準",
+        Quality::Small => "小容量",
+    }
+}
+
+fn quality_note(q: Option<Quality>) -> &'static str {
+    match q {
+        Some(Quality::Best) => "元の映像と見分けがつかない画質。ファイルは大きめ",
+        Some(Quality::High) => "細かい模様でもほとんど劣化が分からない画質（おすすめ）",
+        Some(Quality::Standard) => "ファイルサイズとのバランス重視。細部はやや甘くなる",
+        Some(Quality::Small) => "共有向けの小さいファイル。劣化が見える場合がある",
+        None => "CRF と速度を個別に指定しています",
     }
 }
 

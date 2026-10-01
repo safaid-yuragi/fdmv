@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 pub type Id = u64;
 
-pub const PROJECT_VERSION: u32 = 1;
+pub const PROJECT_VERSION: u32 = 2;
 /// クリップの最短の長さ（秒）。
 pub const MIN_CLIP: f64 = 0.01;
 
@@ -41,6 +41,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
+        let (crf, preset) = libfdmv::ffmpeg::Quality::High.crf_preset();
         Settings {
             title: String::new(),
             auto_format: true,
@@ -48,8 +49,8 @@ impl Default for Settings {
             height: 1080,
             fps_num: 30,
             fps_den: 1,
-            crf: 32,
-            preset: None,
+            crf,
+            preset: Some(preset),
             ten_bit: false,
             audio_bitrate: "128k".into(),
         }
@@ -186,6 +187,15 @@ impl Project {
                 "project version {} is newer than this editor supports",
                 p.version
             );
+        }
+        if p.version < 2 {
+            // v1 の既定画質（CRF 32、preset 未指定）は劣化が目立ったため、新しい既定値に置き換える。
+            if p.settings.crf == 32 && p.settings.preset.is_none() {
+                let d = Settings::default();
+                p.settings.crf = d.crf;
+                p.settings.preset = d.preset;
+            }
+            p.version = PROJECT_VERSION;
         }
         // 素材が移動していたら、プロジェクトファイルからの相対パスで探す。
         let base = path.parent().unwrap_or(Path::new("."));
@@ -786,5 +796,23 @@ mod tests {
         let path = dir.path().join("a.fdmvproj");
         p.save(&path).unwrap();
         assert_eq!(Project::load(&path).unwrap(), p);
+    }
+
+    #[test]
+    fn v1_default_quality_is_migrated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.fdmvproj");
+        let mut p = Project::new();
+        p.version = 1;
+        p.settings.crf = 32;
+        p.settings.preset = None;
+        std::fs::write(&path, serde_json::to_string(&p).unwrap()).unwrap();
+        let q = Project::load(&path).unwrap();
+        assert_eq!(q.version, PROJECT_VERSION);
+        assert_eq!((q.settings.crf, q.settings.preset), (23, Some(6)));
+        // 利用者が変えた値はそのまま
+        p.settings.crf = 40;
+        std::fs::write(&path, serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(Project::load(&path).unwrap().settings.crf, 40);
     }
 }

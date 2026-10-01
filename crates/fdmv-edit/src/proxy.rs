@@ -1,6 +1,7 @@
 //! 素材の取り込みとプレビュー用プロキシ。
 //!
-//! - 映像: 高さ 360 px の AV1 を、映像だけの .fdmv にする（キーフレームを短い間隔で入れ、シークを軽くする）
+//! - 映像: 元の解像度（高さ 1080 px まで）の AV1 を、映像だけの .fdmv にする
+//!   （CRF 24 で VMAF 約 95。キーフレームを短い間隔で入れ、シークを軽くする）
 //! - 音声: 48 kHz ステレオの 16 bit WAV。映像の先頭（素材上の時刻 0）にそろえる
 //!
 //! 音声プロキシは非可逆圧縮をしていないので、書き出し時のミックスにもそのまま使う。
@@ -59,6 +60,9 @@ pub fn probe_source(ff: &Ffmpeg, path: &Path) -> Result<Source> {
     })
 }
 
+/// プロキシの作り方を変えたら上げる（古いプロキシは作り直し、削除する）。
+const PROXY_VERSION: &str = "v2";
+
 #[derive(Clone, Debug)]
 pub struct ProxyStore {
     dir: PathBuf,
@@ -76,6 +80,16 @@ impl ProxyStore {
     pub fn new(dir: impl Into<PathBuf>) -> Result<Self> {
         let dir = dir.into();
         std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        // 古い形式のプロキシを削除する（このディレクトリはプロキシ専用）。
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for e in entries.flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                let is_proxy = name.ends_with(".fdmv") || name.ends_with(".wav");
+                if is_proxy && !name.starts_with(&format!("{PROXY_VERSION}-")) {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
         Ok(ProxyStore { dir })
     }
 
@@ -95,7 +109,7 @@ impl ProxyStore {
             h ^= b as u64;
             h = h.wrapping_mul(0x0100_0000_01b3);
         }
-        format!("{h:016x}")
+        format!("{PROXY_VERSION}-{h:016x}")
     }
 
     pub fn video_path(&self, src: &Source) -> Option<PathBuf> {
@@ -137,7 +151,7 @@ impl ProxyStore {
             };
             let opts = VideoEncodeOptions {
                 encoder: Some(encoder),
-                crf: 45,
+                crf: 24,
                 preset: Some(preset),
                 pix_fmt: "yuv420p".into(),
                 extra_args: vec!["-g".into(), "15".into()],
@@ -147,7 +161,7 @@ impl ProxyStore {
             let ivf = tmp.path().join("proxy.ivf");
             let encoder = ff.encode_video_complex(
                 &input,
-                "[0:v:0]scale=-2:'min(360,ih)':flags=bilinear,format=yuv420p[v]",
+                "[0:v:0]scale=-2:'min(1080,ih)':flags=lanczos,format=yuv420p[v]",
                 "[v]",
                 &ivf,
                 &opts,

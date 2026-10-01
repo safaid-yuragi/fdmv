@@ -5,7 +5,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result, anyhow, bail};
 use libfdmv::decode::{AudioRenderer, ChainDecoder, ChainSelection, VideoStream};
-use libfdmv::ffmpeg::{AudioEncodeOptions, VideoEncodeOptions};
+use libfdmv::ffmpeg::{AudioEncodeOptions, Quality, VideoEncodeOptions};
 use libfdmv::format::{BLOCK_CLUSTER, BLOCK_DIRECTORY, BLOCK_FOOTER, OPUS_SAMPLE_RATE, Rational};
 use libfdmv::ivf::IvfWriter;
 use libfdmv::model::meta_set;
@@ -20,7 +20,7 @@ use crate::util::{
 };
 use crate::{
     AddChainArgs, AudioOpts, ExportArgs, ExtractArgs, ExtractVideoArgs, InfoArgs, PackArgs,
-    SnapshotArgs, VerifyArgs, VideoOpts, WavFormat,
+    QualityArg, SnapshotArgs, VerifyArgs, VideoOpts, WavFormat,
 };
 
 type Reader = FdmvReader<BufReader<File>>;
@@ -44,10 +44,17 @@ fn audio_options(a: &AudioOpts) -> AudioEncodeOptions {
 }
 
 fn video_options(v: &VideoOpts) -> VideoEncodeOptions {
+    let q = match v.quality {
+        QualityArg::Best => Quality::Best,
+        QualityArg::High => Quality::High,
+        QualityArg::Standard => Quality::Standard,
+        QualityArg::Small => Quality::Small,
+    };
+    let (crf, preset) = q.crf_preset();
     VideoEncodeOptions {
         encoder: v.encoder.clone(),
-        crf: v.crf,
-        preset: v.preset,
+        crf: v.crf.unwrap_or(crf),
+        preset: v.preset.or(Some(preset)),
         pix_fmt: if v.ten_bit { "yuv420p10le" } else { "yuv420p" }.into(),
         extra_args: v.ffmpeg_arg.clone(),
     }

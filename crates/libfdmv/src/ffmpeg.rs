@@ -46,7 +46,7 @@ impl ProbeInfo {
 pub struct VideoEncodeOptions {
     /// `libsvtav1` / `libaom-av1` / `librav1e`。None なら使えるものを自動で選ぶ。
     pub encoder: Option<String>,
-    /// 画質（0–63、小さいほど高画質・大容量）。
+    /// 画質（0–63、小さいほど高画質・大容量）。既定は [`Quality::High`]。
     pub crf: u32,
     /// 速度プリセット。エンコーダごとの意味（SVT-AV1: 0–13, libaom: cpu-used 0–8, rav1e: speed 0–10）。
     pub preset: Option<u32>,
@@ -57,13 +57,59 @@ pub struct VideoEncodeOptions {
 
 impl Default for VideoEncodeOptions {
     fn default() -> Self {
+        let (crf, preset) = Quality::High.crf_preset();
         VideoEncodeOptions {
             encoder: None,
-            crf: 32,
-            preset: None,
+            crf,
+            preset: Some(preset),
             pix_fmt: "yuv420p".into(),
             extra_args: Vec::new(),
         }
+    }
+}
+
+/// 画質のプリセット（SVT-AV1 の CRF と速度プリセットの組）。
+///
+/// 720p / 1080p の素材で VMAF を測って決めた値（VMAF 95 以上で原本との差がほぼ分からない）:
+///
+/// | プリセット | CRF | preset | 細かい模様の多い映像 | 文字・図形 |
+/// |---|---|---|---|---|
+/// | Best | 18 | 6 | 約 97 | 99 以上 |
+/// | High（既定） | 23 | 6 | 約 96 | 99 以上 |
+/// | Standard | 30 | 8 | 約 94 | 約 98 |
+/// | Small | 38 | 8 | 90 前後 | 約 96 |
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Quality {
+    Best,
+    High,
+    Standard,
+    Small,
+}
+
+impl Quality {
+    pub const ALL: [Quality; 4] = [
+        Quality::Best,
+        Quality::High,
+        Quality::Standard,
+        Quality::Small,
+    ];
+
+    /// (CRF, SVT-AV1 の preset)
+    pub fn crf_preset(self) -> (u32, u32) {
+        match self {
+            Quality::Best => (18, 6),
+            Quality::High => (23, 6),
+            Quality::Standard => (30, 8),
+            Quality::Small => (38, 8),
+        }
+    }
+
+    /// CRF と preset がどのプリセットに一致するか。
+    pub fn from_crf_preset(crf: u32, preset: Option<u32>) -> Option<Quality> {
+        Quality::ALL.into_iter().find(|q| {
+            let (c, p) = q.crf_preset();
+            c == crf && preset == Some(p)
+        })
     }
 }
 
@@ -220,7 +266,11 @@ impl Ffmpeg {
         match encoder.as_str() {
             "libsvtav1" => {
                 args.extend(strs(&["-crf", &crf.to_string()]));
-                args.extend(strs(&["-preset", &opts.preset.unwrap_or(8).to_string()]));
+                args.extend(strs(&["-preset", &opts.preset.unwrap_or(6).to_string()]));
+                // 見た目の画質を優先するチューニング（既定は PSNR 優先）。
+                if !opts.extra_args.iter().any(|a| a == "-svtav1-params") {
+                    args.extend(strs(&["-svtav1-params", "tune=0"]));
+                }
             }
             "libaom-av1" => {
                 args.extend(strs(&[
