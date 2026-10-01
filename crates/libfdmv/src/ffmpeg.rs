@@ -2,9 +2,12 @@
 //!
 //! 実行ファイルは環境変数 `FDMV_FFMPEG` / `FDMV_FFPROBE` で変更できる（既定は PATH 上のもの）。
 
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::error::{Error, Result};
 
@@ -23,7 +26,20 @@ pub struct ProbeInfo {
     pub audio_streams: usize,
     pub video_start: Option<f64>,
     pub audio_start: Option<f64>,
+    /// ファイル全体の開始時刻（ffmpeg の `-ss` はここからの相対位置）。
+    pub start: Option<f64>,
     pub duration: Option<f64>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    /// 映像のフレームレート（分子, 分母）。
+    pub frame_rate: Option<(u32, u32)>,
+}
+
+impl ProbeInfo {
+    /// 映像の開始時刻に対する音声の開始時刻のずれ（秒）。
+    pub fn audio_offset(&self) -> f64 {
+        self.audio_start.unwrap_or(0.0) - self.video_start.unwrap_or(0.0)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -134,12 +150,8 @@ impl Ffmpeg {
 
     pub fn probe(&self, input: &Path) -> Result<ProbeInfo> {
         let out = Command::new(&self.ffprobe)
-            .args([
-                "-v",
-                "error",
-                "-show_entries",
-                "stream=index,codec_type,start_time:format=duration",
-            ])
+            .args(["-v", "error", "-show_entries"])
+            .arg("stream=index,codec_type,start_time,width,height,r_frame_rate:format=duration,start_time")
             .args(["-of", "flat"])
             .arg(input)
             .stdin(Stdio::null())
@@ -152,8 +164,7 @@ impl Ffmpeg {
             )));
         }
         let text = String::from_utf8_lossy(&out.stdout);
-        let mut types: Vec<(usize, String)> = Vec::new();
-        let mut starts: Vec<(usize, f64)> = Vec::new();
+        let mut streams: BTreeMap<usize, BTreeMap<String, String>> = BTreeMap::new();
         let mut info = ProbeInfo::default();
         for line in text.lines() {
             let Some((key, value)) = line.split_once('=') else {
@@ -162,32 +173,36 @@ impl Ffmpeg {
             let value = value.trim_matches('"');
             if key == "format.duration" {
                 info.duration = value.parse().ok();
-            } else if let Some(rest) = key.strip_prefix("streams.stream.") {
-                let Some((n, field)) = rest.split_once('.') else {
-                    continue;
-                };
-                let Ok(n) = n.parse::<usize>() else { continue };
-                match field {
-                    "codec_type" => types.push((n, value.to_owned())),
-                    "start_time" => {
-                        if let Ok(v) = value.parse() {
-                            starts.push((n, v));
-                        }
-                    }
-                    _ => {}
-                }
+            } else if key == "format.start_time" {
+                info.start = value.parse().ok();
+            } else if let Some(rest) = key.strip_prefix("streams.stream.")
+                && let Some((n, field)) = rest.split_once('.')
+                && let Ok(n) = n.parse::<usize>()
+            {
+                streams
+                    .entry(n)
+                    .or_default()
+                    .insert(field.to_owned(), value.to_owned());
             }
         }
-        let start_of = |n: usize| starts.iter().find(|(i, _)| *i == n).map(|(_, v)| *v);
-        for (n, t) in &types {
-            match t.as_str() {
-                "video" if !info.has_video => {
+        for fields in streams.values() {
+            let get = |k: &str| fields.get(k).map(String::as_str);
+            let start = get("start_time").and_then(|v| v.parse().ok());
+            match get("codec_type") {
+                Some("video") if !info.has_video => {
                     info.has_video = true;
-                    info.video_start = start_of(*n);
+                    info.video_start = start;
+                    info.width = get("width").and_then(|v| v.parse().ok());
+                    info.height = get("height").and_then(|v| v.parse().ok());
+                    info.frame_rate = get("r_frame_rate").and_then(|v| {
+                        let (n, d) = v.split_once('/')?;
+                        let (n, d) = (n.parse().ok()?, d.parse().ok()?);
+                        (n > 0 && d > 0).then_some((n, d))
+                    });
                 }
-                "audio" => {
+                Some("audio") => {
                     if info.audio_streams == 0 {
-                        info.audio_start = start_of(*n);
+                        info.audio_start = start;
                     }
                     info.audio_streams += 1;
                 }
@@ -197,26 +212,10 @@ impl Ffmpeg {
         Ok(info)
     }
 
-    /// 入力の最初の映像ストリームを AV1 の IVF にエンコードする。使ったエンコーダ名を返す。
-    pub fn encode_video(
-        &self,
-        input: &Path,
-        output: &Path,
-        opts: &VideoEncodeOptions,
-    ) -> Result<String> {
+    /// AV1 エンコーダの選択と、出力側の引数（画素形式・エンコーダ・品質・追加引数）。
+    pub fn av1_output_args(&self, opts: &VideoEncodeOptions) -> Result<(String, Vec<OsString>)> {
         let encoder = self.pick_av1_encoder(opts.encoder.as_deref())?;
-        let mut args: Vec<OsString> = Vec::new();
-        args.extend(["-i".into(), input.as_os_str().to_owned()]);
-        args.extend(strs(&[
-            "-map",
-            "0:v:0",
-            "-an",
-            "-sn",
-            "-dn",
-            "-map_metadata",
-            "-1",
-        ]));
-        args.extend(strs(&["-pix_fmt", &opts.pix_fmt, "-c:v", &encoder]));
+        let mut args = strs(&["-pix_fmt", &opts.pix_fmt, "-c:v", &encoder]);
         let crf = opts.crf.min(63);
         match encoder.as_str() {
             "libsvtav1" => {
@@ -242,10 +241,128 @@ impl Ffmpeg {
             _ => {}
         }
         args.extend(opts.extra_args.iter().map(OsString::from));
+        Ok((encoder, args))
+    }
+
+    /// 入力の最初の映像ストリームを AV1 の IVF にエンコードする。使ったエンコーダ名を返す。
+    pub fn encode_video(
+        &self,
+        input: &Path,
+        output: &Path,
+        opts: &VideoEncodeOptions,
+    ) -> Result<String> {
+        let (encoder, codec_args) = self.av1_output_args(opts)?;
+        let mut args: Vec<OsString> = vec!["-i".into(), input.as_os_str().to_owned()];
+        args.extend(strs(&[
+            "-map",
+            "0:v:0",
+            "-an",
+            "-sn",
+            "-dn",
+            "-map_metadata",
+            "-1",
+        ]));
+        args.extend(codec_args);
         args.extend(strs(&["-f", "ivf"]));
         args.push(output.as_os_str().to_owned());
         self.run(&args)?;
         Ok(encoder)
+    }
+
+    /// 任意の入力と `-filter_complex` から AV1 の IVF を作る。`map` は映像の出力ラベル（例: `[v]`）。
+    /// `total_secs` は進捗計算用の出力の長さ。使ったエンコーダ名を返す。
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_video_complex(
+        &self,
+        input_args: &[OsString],
+        filter: &str,
+        map: &str,
+        output: &Path,
+        opts: &VideoEncodeOptions,
+        total_secs: f64,
+        progress: &mut dyn FnMut(f64),
+        cancel: Option<&AtomicBool>,
+    ) -> Result<String> {
+        let (encoder, codec_args) = self.av1_output_args(opts)?;
+        let mut args: Vec<OsString> = input_args.to_vec();
+        args.extend(strs(&[
+            "-filter_complex",
+            filter,
+            "-map",
+            map,
+            "-an",
+            "-sn",
+            "-dn",
+        ]));
+        args.extend(strs(&["-map_metadata", "-1"]));
+        args.extend(codec_args);
+        args.extend(strs(&["-f", "ivf"]));
+        args.push(output.as_os_str().to_owned());
+        self.run_with_progress(&args, total_secs, progress, cancel)?;
+        Ok(encoder)
+    }
+
+    /// ffmpeg を実行し、`-progress` の出力から進捗（0.0–1.0）を報告する。
+    /// `cancel` が立つと ffmpeg を止めてエラーを返す。
+    pub fn run_with_progress<S: AsRef<OsStr>>(
+        &self,
+        args: &[S],
+        total_secs: f64,
+        progress: &mut dyn FnMut(f64),
+        cancel: Option<&AtomicBool>,
+    ) -> Result<()> {
+        let mut cmd = Command::new(&self.ffmpeg);
+        cmd.args([
+            "-hide_banner",
+            "-nostdin",
+            "-y",
+            "-loglevel",
+            "error",
+            "-nostats",
+        ]);
+        cmd.args(["-progress", "pipe:1"]);
+        cmd.args(args);
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = cmd.spawn()?;
+        let stderr = child.stderr.take().unwrap();
+        let err_thread = std::thread::spawn(move || {
+            let mut s = String::new();
+            let _ = BufReader::new(stderr).read_to_string(&mut s);
+            s
+        });
+        let stdout = BufReader::new(child.stdout.take().unwrap());
+        let mut cancelled = false;
+        for line in stdout.lines() {
+            let line = line?;
+            if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+                let _ = child.kill();
+                cancelled = true;
+                break;
+            }
+            if let Some(v) = line
+                .strip_prefix("out_time_us=")
+                .or_else(|| line.strip_prefix("out_time_ms="))
+                && let Ok(us) = v.trim().parse::<f64>()
+                && total_secs > 0.0
+            {
+                progress((us / 1e6 / total_secs).clamp(0.0, 1.0));
+            }
+        }
+        let status = child.wait()?;
+        let err = err_thread.join().unwrap_or_default();
+        if cancelled {
+            return Err(Error::Ffmpeg("cancelled".into()));
+        }
+        if !status.success() {
+            return Err(Error::Ffmpeg(format!(
+                "ffmpeg exited with {status}: {}",
+                err.trim()
+            )));
+        }
+        progress(1.0);
+        Ok(())
     }
 
     /// 入力の `audio_index` 番目の音声ストリームを Ogg Opus にエンコードする。

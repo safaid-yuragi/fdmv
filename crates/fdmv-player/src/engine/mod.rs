@@ -1,19 +1,56 @@
 //! 再生エンジン。UI から独立しており、音声をマスタークロックにして映像を同期させる。
 
-mod audio;
-mod video;
-
+use std::fs::File;
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use eframe::egui;
-use libfdmv::decode::ChainSelection;
+use fdmv_gui::{AudioOutput, FrameSource, PcmSource, VideoOutput};
+use libfdmv::decode::{AudioRenderer, ChainSelection, VideoStream};
 use libfdmv::format::{OPUS_SAMPLE_RATE, Rational};
 use libfdmv::{ChainRole, Directory, FdmvReader, Segment};
 
-use audio::{AudioCommand, AudioEngine};
-pub use video::Frame;
-use video::VideoEngine;
+pub use fdmv_gui::Frame;
+
+type Reader = FdmvReader<BufReader<File>>;
+
+/// ファイルのチェーンをミックスする音源。
+struct FileAudio {
+    reader: Reader,
+    renderer: AudioRenderer,
+}
+
+impl PcmSource for FileAudio {
+    fn seek(&mut self, sample: i64) -> Result<()> {
+        Ok(self.renderer.seek(&mut self.reader, sample)?)
+    }
+    fn render(&mut self, out: &mut [f32]) -> Result<usize> {
+        Ok(self.renderer.render(&mut self.reader, out)?)
+    }
+}
+
+/// ファイルの映像を順にデコードする映像源。
+struct FileVideo {
+    reader: Reader,
+    stream: VideoStream,
+    timebase: Rational,
+    buf: Vec<u8>,
+}
+
+impl FrameSource for FileVideo {
+    fn seek(&mut self, seconds: f64) -> Result<()> {
+        Ok(self
+            .stream
+            .seek(&mut self.reader, self.timebase.floor_seconds(seconds))?)
+    }
+    fn next_frame(&mut self) -> Result<Option<Frame>> {
+        Ok(self.stream.next_frame(&mut self.reader)?.map(|f| {
+            let pts = self.timebase.to_seconds(f.pts());
+            fdmv_gui::frame_from_decoded(&f, pts, &mut self.buf)
+        }))
+    }
+}
 
 pub struct ChainState {
     pub id: u16,
@@ -45,8 +82,8 @@ pub struct Player {
     pub chains: Vec<ChainState>,
     pub duration: f64,
     pub file_size: u64,
-    audio: AudioEngine,
-    video: VideoEngine,
+    audio: AudioOutput<FileAudio>,
+    video: VideoOutput<FileVideo>,
 }
 
 impl Player {
@@ -75,13 +112,29 @@ impl Player {
                 })
             })
             .collect();
-        let selections = chains
+        let selections: Vec<ChainSelection> = chains
             .iter()
             .filter(|c| c.enabled)
             .map(|c| c.selection())
             .collect();
-        let audio = AudioEngine::start(path, selections)?;
-        let video = VideoEngine::start(path, ctx)?;
+        let reader = FdmvReader::open(path).context("opening file for audio")?;
+        let renderer = AudioRenderer::new(&dir, &selections, Some(fdmv_gui::audio::CHANNELS))?;
+        let audio = AudioOutput::start(FileAudio { reader, renderer })?;
+        let reader = FdmvReader::open(path).context("opening file for video")?;
+        let timebase = dir
+            .video()
+            .map(|v| v.timebase)
+            .unwrap_or(Rational::new(1, 1));
+        let stream = VideoStream::new(&dir, 0)?;
+        let video = VideoOutput::start(
+            FileVideo {
+                reader,
+                stream,
+                timebase,
+                buf: Vec::new(),
+            },
+            ctx,
+        )?;
         let duration = dir.duration_seconds();
         let player = Player {
             path: path.to_owned(),
@@ -151,18 +204,26 @@ impl Player {
     pub fn set_chain_enabled(&mut self, index: usize, enabled: bool) {
         let c = &mut self.chains[index];
         c.enabled = enabled;
+        let (sel, id) = (c.selection(), c.id);
         if enabled {
-            self.audio.send(AudioCommand::AddChain(c.selection()));
+            self.audio
+                .with(move |s| Ok(s.renderer.add_chain(&mut s.reader, sel)?));
         } else {
-            self.audio.send(AudioCommand::RemoveChain(c.id));
+            self.audio.with(move |s| {
+                s.renderer.remove_chain(id);
+                Ok(())
+            });
         }
     }
 
     pub fn set_chain_volume(&mut self, index: usize, volume: f32) {
         let c = &mut self.chains[index];
         c.volume = volume;
-        self.audio
-            .send(AudioCommand::SetGain(c.id, c.file_gain * c.volume));
+        let (id, gain) = (c.id, c.file_gain * c.volume);
+        self.audio.with(move |s| {
+            s.renderer.set_gain(id, gain);
+            Ok(())
+        });
     }
 
     /// 現在の再生位置で表示すべき新しいフレーム。
@@ -178,7 +239,7 @@ impl Player {
     }
 
     pub fn error(&self) -> Option<String> {
-        self.video.error()
+        self.video.take_error().or_else(|| self.audio.take_error())
     }
 }
 

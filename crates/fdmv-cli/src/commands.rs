@@ -608,7 +608,7 @@ pub fn snapshot(a: SnapshotArgs) -> Result<ExitCode> {
     let secs = parse_time(&a.at)?;
     let pts = v
         .timebase
-        .from_seconds(secs)
+        .floor_seconds(secs)
         .clamp(0, (v.duration - 1).max(0));
     let mut stream = VideoStream::new(&dir, 0)?;
     stream.seek(&mut reader, pts)?;

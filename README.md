@@ -16,6 +16,9 @@ AV1 の映像 1 本と、映像に同期して**重ねて**再生できる Opus 
 | `crates/libfdmv` | ライブラリ。読み書き・追記・デコード（dav1d / libopus）・チェーンのミックス・ffmpeg による取り込み |
 | `crates/fdmv-cli` | `fdmv` コマンド |
 | `crates/fdmv-player` | `fdmv-player`（egui 製の GUI プレイヤー。Linux / macOS / Windows） |
+| `crates/fdmv-editor` | `fdmv-editor`（簡易動画編集。タイムラインでカット・分割・範囲削除、チェーンへの音声配置） |
+| `crates/fdmv-edit` | 編集の中核（プロジェクト、編集操作、プロキシ、ミックス、書き出し）。GUI に依存しない |
+| `crates/fdmv-gui` | プレイヤーとエディタで共有する部品（音声出力、映像キュー、日本語フォント） |
 
 ## ビルド
 
@@ -35,7 +38,7 @@ AV1 の映像 1 本と、映像に同期して**重ねて**再生できる Opus 
 
 ```sh
 cargo build --release
-# target/release/fdmv と target/release/fdmv-player ができる
+# target/release/ に fdmv / fdmv-player / fdmv-editor ができる
 ```
 
 - Windows で MSYS2 を使う場合は UCRT64 のシェルでビルドする。実行時は `dav1d` / `libopus` の DLL（`C:\msys64\ucrt64\bin`）に PATH を通すか、exe と同じフォルダに置く。
@@ -79,6 +82,25 @@ fdmv-player movie.fdmv     # ファイルを指定して起動（ウィンドウ
   見つからなければ英語表示になる。`FDMV_FONT=/path/to/font.ttf` で指定もできる。
 - 環境変数: `FDMV_NO_AUDIO=1` で音声デバイスを使わない、`FDMV_DEBUG_SCREENSHOT=out.ppm` で
   自己テスト（全チェーンを ON にして 2 秒の位置から 1.5 秒再生し、画面を保存して終了）。
+
+## エディタ
+
+```sh
+fdmv-editor                       # 新規
+fdmv-editor project.fdmvproj      # プロジェクトを開く
+fdmv-editor input.mp4             # 動画を読み込んで映像トラックに並べた状態で開始
+```
+
+- **素材**: 動画・音声ファイルをウィンドウにドロップ（または「＋ 追加」）。読み込むとプレビュー用のプロキシ
+  （360p の AV1 と 48 kHz WAV）を OS のキャッシュディレクトリに作る。素材一覧からタイムラインへドラッグして配置する。
+- **映像トラック**: 素材を並べた順に 1 本の動画になる（隙間なし）。ドラッグで並べ替え、端のドラッグでトリム。
+- **チェーン**: 各行がチェーン 1 本。素材をドラッグするか「＋」で再生位置に音声を置く（重ねてもミックスされる）。
+  デフォルトチェーンには映像クリップの音声が自動で含まれる（プロパティで切り替え可）。
+- **カット**: S で再生位置で分割、Delete で選択クリップを削除（映像は後ろを詰める）、
+  I / O でイン点・アウト点を決めて Shift+Delete で全トラックから範囲を削除して詰める。
+- **元に戻す**: Ctrl+Z / Ctrl+Y。**保存**: Ctrl+S（`.fdmvproj`、JSON）。**書き出し**: Ctrl+E（ffmpeg で再エンコードして `.fdmv`）。
+- 書き出しの解像度・フレームレートは既定で最初の映像クリップに合わせる（右パネルで変更可）。
+- GUI なしでの書き出し: `cargo run --release -p fdmv-edit --example export_project -- project.fdmvproj out.fdmv`
 
 ## テスト
 

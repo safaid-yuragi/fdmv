@@ -2,8 +2,9 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
-mod engine;
-mod texts;
+mod history;
+mod jobs;
+mod panels;
 mod timeline;
 
 use std::path::PathBuf;
@@ -18,26 +19,23 @@ fn main() -> eframe::Result {
         .map(PathBuf::from);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("FDMV Player")
-            .with_app_id("fdmv-player")
-            .with_inner_size([1024.0, 680.0])
-            .with_min_inner_size([480.0, 320.0])
+            .with_title("FDMV Editor")
+            .with_app_id("fdmv-editor")
+            .with_inner_size([1360.0, 860.0])
+            .with_min_inner_size([900.0, 560.0])
             .with_drag_and_drop(true),
         ..Default::default()
     };
     eframe::run_native(
-        "fdmv-player",
+        "fdmv-editor",
         options,
         Box::new(move |cc| {
-            let texts = if fdmv_gui::fonts::install(&cc.egui_ctx) {
-                &texts::JA
-            } else {
+            if !fdmv_gui::fonts::install(&cc.egui_ctx) {
                 eprintln!(
-                    "no CJK font found; using English UI (set FDMV_FONT to a font file to override)"
+                    "no CJK font found; Japanese text may not display (set FDMV_FONT to a font file)"
                 );
-                &texts::EN
-            };
-            Ok(Box::new(app::App::new(texts, &cc.egui_ctx, path)))
+            }
+            Ok(Box::new(app::App::new(&cc.egui_ctx, path)))
         }),
     )
 }

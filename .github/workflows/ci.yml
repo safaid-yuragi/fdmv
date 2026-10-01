@@ -37,6 +37,7 @@ jobs:
           path: |
             target/release/fdmv
             target/release/fdmv-player
+            target/release/fdmv-editor
 
   windows:
     runs-on: windows-latest

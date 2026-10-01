@@ -1,6 +1,13 @@
 [workspace]
 resolver = "3"
-members = ["crates/libfdmv", "crates/fdmv-cli", "crates/fdmv-player"]
+members = [
+    "crates/libfdmv",
+    "crates/fdmv-cli",
+    "crates/fdmv-gui",
+    "crates/fdmv-player",
+    "crates/fdmv-edit",
+    "crates/fdmv-editor",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,3 +17,5 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 libfdmv = { path = "crates/libfdmv" }
+fdmv-gui = { path = "crates/fdmv-gui" }
+fdmv-edit = { path = "crates/fdmv-edit" }

@@ -1,36 +1,42 @@
-//! 音声: チェーンのミックス（ワーカースレッド）→ リングバッファ → 出力デバイス。
+//! 音声出力: 音源（ワーカースレッド）→ リングバッファ → 出力デバイス。
 //!
 //! 出力デバイスが消費したフレーム数が再生位置（マスタークロック）になる。
-//! デバイスが無い環境では、実時間で消費するだけのダミー出力を使う。
+//! デバイスが無い環境（または `FDMV_NO_AUDIO` 指定時）は、実時間で消費するだけのダミー出力を使う。
 
 use std::collections::VecDeque;
-use std::fs::File;
-use std::io::BufReader;
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample};
-use libfdmv::FdmvReader;
-use libfdmv::decode::{AudioRenderer, ChainSelection};
 use libfdmv::format::OPUS_SAMPLE_RATE;
 
-/// ミックス結果のチャンネル数（ステレオ固定）。
-const MIX_CHANNELS: usize = 2;
+/// 音源のチャンネル数（ステレオ固定）。
+pub const CHANNELS: usize = 2;
+/// 音源のサンプルレート。
+pub const SAMPLE_RATE: u32 = OPUS_SAMPLE_RATE;
 /// 先読みしておく長さ（秒）。
 const BUFFER_SECONDS: f64 = 0.25;
 
-pub enum AudioCommand {
+/// 48 kHz ステレオの PCM を生成する音源。ワーカースレッドで動く。
+pub trait PcmSource: Send + 'static {
+    /// 位置（48 kHz サンプル）を変更する。
+    fn seek(&mut self, sample: i64) -> Result<()>;
+    /// `out`（ステレオ・インターリーブ）を埋め、書いたフレーム数を返す。終わりなら 0。
+    fn render(&mut self, out: &mut [f32]) -> Result<usize>;
+}
+
+type Job<S> = Box<dyn FnOnce(&mut S) -> Result<()> + Send>;
+
+enum Command<S> {
     /// (位置, 世代)
     Seek(i64, u64),
-    AddChain(ChainSelection),
-    RemoveChain(u16),
-    SetGain(u16, f32),
+    /// ワーカースレッドで音源を操作する。
+    With(Job<S>),
 }
 
 /// ワーカーと出力コールバックが共有する状態。
@@ -53,6 +59,7 @@ struct Shared {
     /// マスター音量（f32 のビット列）。
     volume: AtomicU32,
     rate: u32,
+    error: Mutex<Option<String>>,
 }
 
 impl Shared {
@@ -68,7 +75,7 @@ impl Shared {
         if self.playing.load(Ordering::Relaxed)
             && let Ok(mut q) = self.queue.try_lock()
         {
-            let n = frames.min(q.samples.len() / MIX_CHANNELS);
+            let n = frames.min(q.samples.len() / CHANNELS);
             for f in 0..n {
                 let l = q.samples.pop_front().unwrap() * volume;
                 let r = q.samples.pop_front().unwrap() * volume;
@@ -173,19 +180,17 @@ impl Drop for Output {
     }
 }
 
-pub struct AudioEngine {
+pub struct AudioOutput<S: PcmSource> {
     shared: Arc<Shared>,
-    tx: Sender<AudioCommand>,
+    tx: Option<Sender<Command<S>>>,
     worker: Option<JoinHandle<()>>,
     _output: Output,
     device_name: Option<String>,
 }
 
-impl AudioEngine {
-    pub fn start(path: &Path, selections: Vec<ChainSelection>) -> Result<Self> {
-        let reader = FdmvReader::open(path).context("opening file for audio")?;
-        let renderer = AudioRenderer::new(reader.directory(), &selections, Some(MIX_CHANNELS))?;
-
+impl<S: PcmSource> AudioOutput<S> {
+    /// 出力を開き、`source` を位置 0 から鳴らす準備をする（最初は一時停止）。
+    pub fn start(source: S) -> Result<Self> {
         let (config, device) = match open_device() {
             Ok((config, device)) => (Some(config), Some(device)),
             Err(e) => {
@@ -196,7 +201,7 @@ impl AudioEngine {
         let rate = config
             .as_ref()
             .map(|c| c.sample_rate())
-            .unwrap_or(OPUS_SAMPLE_RATE);
+            .unwrap_or(SAMPLE_RATE);
         let shared = Arc::new(Shared {
             queue: Mutex::new(Queue {
                 samples: VecDeque::new(),
@@ -208,6 +213,7 @@ impl AudioEngine {
             playing: AtomicBool::new(false),
             volume: AtomicU32::new(1.0f32.to_bits()),
             rate,
+            error: Mutex::new(None),
         });
 
         let output = match (config, device) {
@@ -238,26 +244,27 @@ impl AudioEngine {
         let worker_shared = shared.clone();
         let worker = std::thread::Builder::new()
             .name("fdmv-audio".into())
-            .spawn(move || {
-                if let Err(e) = worker(reader, renderer, worker_shared, rx) {
-                    eprintln!("audio worker: {e:#}");
-                }
-            })?;
-        Ok(AudioEngine {
+            .spawn(move || worker(source, worker_shared, rx))?;
+        Ok(AudioOutput {
             shared,
-            tx,
+            tx: Some(tx),
             worker: Some(worker),
             _output: output,
             device_name,
         })
     }
 
+    /// 出力デバイス名。ダミー出力なら None。
     pub fn device_name(&self) -> Option<&str> {
         self.device_name.as_deref()
     }
 
-    pub fn send(&self, cmd: AudioCommand) {
-        let _ = self.tx.send(cmd);
+    /// ワーカースレッドで音源を操作する（チェーンの追加や内容の差し替えなど）。
+    /// 既に用意済みのサンプルには反映されないので、すぐに反映したい場合はこの後に [`Self::seek`] する。
+    pub fn with(&self, f: impl FnOnce(&mut S) -> Result<()> + Send + 'static) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(Command::With(Box::new(f)));
+        }
     }
 
     /// 再生位置をすぐに反映するため、キューもここで空にする（ワーカーは後から追いつく）。
@@ -271,7 +278,9 @@ impl AudioEngine {
             q.generation += 1;
             q.generation
         };
-        self.send(AudioCommand::Seek(sample, generation));
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(Command::Seek(sample, generation));
+        }
     }
 
     pub fn set_playing(&self, playing: bool) {
@@ -289,7 +298,7 @@ impl AudioEngine {
     /// 再生位置（48 kHz サンプル）。
     pub fn position(&self) -> i64 {
         let q = self.shared.queue.lock().unwrap();
-        q.base + (q.consumed as f64 * OPUS_SAMPLE_RATE as f64 / self.shared.rate as f64) as i64
+        q.base + (q.consumed as f64 * SAMPLE_RATE as f64 / self.shared.rate as f64) as i64
     }
 
     /// 最後まで再生し終えた。
@@ -297,28 +306,31 @@ impl AudioEngine {
         let q = self.shared.queue.lock().unwrap();
         q.eof && q.samples.is_empty()
     }
+
+    /// 音源で起きたエラー（取り出すと消える）。
+    pub fn take_error(&self) -> Option<String> {
+        self.shared.error.lock().unwrap().take()
+    }
 }
 
-impl Drop for AudioEngine {
+impl<S: PcmSource> Drop for AudioOutput<S> {
     fn drop(&mut self) {
         // チャンネルを閉じるとワーカーが終了する。
-        let (dummy, _) = channel();
-        drop(std::mem::replace(&mut self.tx, dummy));
+        self.tx = None;
         if let Some(w) = self.worker.take() {
             let _ = w.join();
         }
     }
 }
 
-fn worker(
-    mut reader: FdmvReader<BufReader<File>>,
-    mut renderer: AudioRenderer,
-    shared: Arc<Shared>,
-    rx: Receiver<AudioCommand>,
-) -> Result<()> {
+fn worker<S: PcmSource>(mut source: S, shared: Arc<Shared>, rx: Receiver<Command<S>>) {
+    let report = |e: anyhow::Error| {
+        eprintln!("audio: {e:#}");
+        *shared.error.lock().unwrap() = Some(format!("{e:#}"));
+    };
     let mut resampler = Resampler::new(shared.rate);
-    let target = (shared.rate as f64 * BUFFER_SECONDS) as usize * MIX_CHANNELS;
-    let mut mix = vec![0f32; 1024 * MIX_CHANNELS];
+    let target = (shared.rate as f64 * BUFFER_SECONDS) as usize * CHANNELS;
+    let mut mix = vec![0f32; 1024 * CHANNELS];
     let mut converted = VecDeque::new();
     let mut eof = false;
     let mut generation = 0u64;
@@ -332,27 +344,37 @@ fn worker(
         let cmd = match rx.recv_timeout(wait) {
             Ok(c) => Some(c),
             Err(RecvTimeoutError::Timeout) => None,
-            Err(RecvTimeoutError::Disconnected) => return Ok(()),
+            Err(RecvTimeoutError::Disconnected) => return,
         };
         if let Some(cmd) = cmd {
             match cmd {
-                AudioCommand::Seek(sample, g) => {
-                    renderer.seek(&mut reader, sample)?;
+                Command::Seek(sample, g) => {
+                    if let Err(e) = source.seek(sample) {
+                        report(e);
+                    }
                     resampler.reset();
                     converted.clear();
                     eof = false;
                     generation = g;
                 }
-                AudioCommand::AddChain(sel) => renderer.add_chain(&mut reader, sel)?,
-                AudioCommand::RemoveChain(id) => renderer.remove_chain(id),
-                AudioCommand::SetGain(id, g) => renderer.set_gain(id, g),
+                Command::With(f) => {
+                    if let Err(e) = f(&mut source) {
+                        report(e);
+                    }
+                }
             }
             continue;
         }
         if eof || queued >= target {
             continue;
         }
-        let n = renderer.render(&mut reader, &mut mix)?;
+        let n = match source.render(&mut mix) {
+            Ok(n) => n,
+            Err(e) => {
+                report(e);
+                0
+            }
+        };
         let mut q = shared.queue.lock().unwrap();
         if q.generation != generation {
             // まだ処理していないシークがある。古い位置のサンプルは捨てる。
@@ -363,7 +385,7 @@ fn worker(
             q.eof = true;
             continue;
         }
-        resampler.process(&mix[..n * MIX_CHANNELS], &mut converted);
+        resampler.process(&mix[..n * CHANNELS], &mut converted);
         q.samples.extend(converted.drain(..));
     }
 }
@@ -435,8 +457,8 @@ fn null_output(shared: Arc<Shared>) -> Output {
             let frames = due.floor() as usize;
             carry = due - frames as f64;
             if shared.playing.load(Ordering::Relaxed) {
-                scratch.resize(frames * MIX_CHANNELS, 0.0);
-                shared.fill(&mut scratch, MIX_CHANNELS);
+                scratch.resize(frames * CHANNELS, 0.0);
+                shared.fill(&mut scratch, CHANNELS);
             }
         }
     });

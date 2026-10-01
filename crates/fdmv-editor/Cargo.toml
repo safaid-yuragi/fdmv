@@ -1,21 +1,22 @@
 [package]
-name = "fdmv-player"
-description = "Desktop player for the FDMV video format"
+name = "fdmv-editor"
+description = "Simple timeline editor for the FDMV video format"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "fdmv-player"
+name = "fdmv-editor"
 path = "src/main.rs"
 
 [dependencies]
 libfdmv.workspace = true
 fdmv-gui.workspace = true
+fdmv-edit.workspace = true
 anyhow = "1"
 eframe = "0.36"
 rfd = "0.17"
 
 [dev-dependencies]
-tempfile = "3"
+egui_kittest = "0.36"

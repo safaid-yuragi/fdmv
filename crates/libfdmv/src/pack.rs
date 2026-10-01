@@ -45,7 +45,7 @@ impl SegmentSource {
     /// 映像ファイル自身の音声を、映像と同期する位置に置くセグメント。
     /// 音声と映像の開始時刻のずれ（コンテナ上の start_time）を補正する。
     pub fn from_video_audio(path: impl Into<PathBuf>, probe: &ProbeInfo) -> Self {
-        let offset = probe.audio_start.unwrap_or(0.0) - probe.video_start.unwrap_or(0.0);
+        let offset = probe.audio_offset();
         let mut s = SegmentSource::new(path, 0.0);
         if offset >= 0.0 {
             s.start = offset;
@@ -117,10 +117,27 @@ pub fn pack(
         }
     }
     let tmp = tempfile::tempdir()?;
-    let mut report = PackReport::default();
-
     let ivf_path = tmp.path().join("video.ivf");
-    report.encoder = ff.encode_video(input, &ivf_path, &opts.video)?;
+    let encoder = ff.encode_video(input, &ivf_path, &opts.video)?;
+    pack_ivf(ff, &ivf_path, &encoder, chains, opts, output)
+}
+
+/// エンコード済みの AV1 IVF（`ivf_path`）と `chains` から FDMV ファイルを作る。
+/// `encoder` はメタデータに記録するエンコーダ名。
+pub fn pack_ivf(
+    ff: &Ffmpeg,
+    ivf_path: &Path,
+    encoder: &str,
+    chains: &[ChainSpec],
+    opts: &PackOptions,
+    output: &Path,
+) -> Result<PackReport> {
+    check_chain_specs(chains, &[], false)?;
+    let tmp = tempfile::tempdir()?;
+    let mut report = PackReport {
+        encoder: encoder.to_owned(),
+        ..Default::default()
+    };
     let mut sources = Vec::new();
     for (ci, spec) in chains.iter().enumerate() {
         sources.push(EncodedChain::encode(ff, spec, &opts.audio, tmp.path(), ci)?);
@@ -130,7 +147,7 @@ pub fn pack(
     let result = (|| -> Result<()> {
         let file = BufWriter::new(File::create(&partial)?);
         let mut mux = Muxer::new(file)?;
-        let mut video = VideoSource::open(&ivf_path)?;
+        let mut video = VideoSource::open(ivf_path)?;
         let video_id = mux.add_stream(video.entry())?;
         video.stream_id = video_id;
 

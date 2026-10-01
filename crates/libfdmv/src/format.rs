@@ -86,6 +86,11 @@ impl Rational {
         (secs * self.den as f64 / self.num as f64).round() as i64
     }
 
+    /// 秒を tick に変換する（切り捨て）。「その時刻に表示されているフレーム」を求めるときに使う。
+    pub fn floor_seconds(self, secs: f64) -> i64 {
+        (secs * self.den as f64 / self.num as f64 + 1e-9).floor() as i64
+    }
+
     /// `ticks`（タイムベース `self`）を `to` に変換する。最も近い値に丸める。
     pub fn rescale(self, ticks: i64, to: Rational) -> i64 {
         let n = ticks as i128 * self.num as i128 * to.den as i128;
