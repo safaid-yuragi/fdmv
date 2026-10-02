@@ -7,6 +7,8 @@ members = [
     "crates/fdmv-player",
     "crates/fdmv-edit",
     "crates/fdmv-editor",
+    "crates/fdmv-capture",
+    "crates/fdmv-recorder",
 ]
 
 [workspace.package]
@@ -19,3 +21,4 @@ rust-version = "1.85"
 libfdmv = { path = "crates/libfdmv" }
 fdmv-gui = { path = "crates/fdmv-gui" }
 fdmv-edit = { path = "crates/fdmv-edit" }
+fdmv-capture = { path = "crates/fdmv-capture" }

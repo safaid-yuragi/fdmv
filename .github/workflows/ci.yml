@@ -15,7 +15,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libdav1d-dev libopus-dev libasound2-dev pkg-config ffmpeg
+          sudo apt-get install -y libdav1d-dev libopus-dev libasound2-dev libpipewire-0.3-dev libclang-dev pkg-config ffmpeg
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -38,6 +38,7 @@ jobs:
             target/release/fdmv
             target/release/fdmv-player
             target/release/fdmv-editor
+            target/release/fdmv-recorder
 
   windows:
     runs-on: windows-latest
